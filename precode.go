@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -15,16 +14,17 @@ import (
 // сгенерированных чисел.
 func Generator(ctx context.Context, ch chan<- int64, fn func(int64)) {
 	// 1. Функция Generator
-	var i atomic.Int64
+	var i int64
 
 	for {
 		select {
 		case <-ctx.Done():
+			close(ch)
 			return
 		default:
-			i.Add(1)
-			ch <- i.Load()
-			fn(i.Load())
+			i++
+			ch <- i
+			fn(i)
 		}
 	}
 }
@@ -32,8 +32,14 @@ func Generator(ctx context.Context, ch chan<- int64, fn func(int64)) {
 // Worker читает число из канала in и пишет его в канал out.
 func Worker(in <-chan int64, out chan<- int64) {
 	// 2. Функция Worker
-	for v := range in {
+	for {
+		v, ok := <-in
+		if !ok {
+			close(out)
+			return
+		}
 		out <- v
+		time.Sleep(1 * time.Millisecond)
 	}
 }
 
@@ -41,7 +47,7 @@ func main() {
 	chIn := make(chan int64)
 
 	// 3. Создание контекста
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Microsecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
 	// для проверки будем считать количество и сумму отправленных чисел
@@ -49,9 +55,12 @@ func main() {
 	var inputCount int64 // количество сгенерированных чисел
 
 	// генерируем числа, считая параллельно их количество и сумму
+	var mu sync.Mutex
 	go Generator(ctx, chIn, func(i int64) {
+		mu.Lock()
 		inputSum += i
 		inputCount++
+		mu.Unlock()
 	})
 
 	const NumOut = 5 // количество обрабатывающих горутин и каналов
@@ -73,13 +82,13 @@ func main() {
 	// 4. Собираем числа из каналов outs
 	for i := 0; i < NumOut; i++ {
 		wg.Add(1)
-		go func(i int) {
-			for v := range outs[i] {
+		go func(in <-chan int64, i int) {
+			for v := range in {
 				chOut <- v
-				atomic.AddInt64(&amounts[i], 1)
+				amounts[i]++
 			}
 			wg.Done()
-		}(i)
+		}(outs[i], i)
 	}
 
 	go func() {
@@ -93,14 +102,10 @@ func main() {
 	var sum int64   // сумма чисел результирующего канала
 
 	// 5. Читаем числа из результирующего канала
-	go func() {
-		for v := range chOut {
-			atomic.AddInt64(&count, 1)
-			atomic.AddInt64(&sum, v)
-		}
-	}()
-
-	time.Sleep(2 * time.Second)
+	for v := range chOut {
+		count++
+		sum += v
+	}
 
 	fmt.Println("Количество чисел", inputCount, count)
 	fmt.Println("Сумма чисел", inputSum, sum)
